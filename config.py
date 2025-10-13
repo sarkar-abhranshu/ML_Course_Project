@@ -16,7 +16,7 @@ TIME_WINDOW_DAYS = 90  # for temporal features
 MODELS_TO_TRAIN = ["logistic", "random_forest", "xgboost"]
 
 # Thresholds
-FIRE_SIZE_THRESHOLD = 0.25  # acres - fires above this are 'significant'
+FIRE_SIZE_THRESHOLD = 1.0  # acres - fires above this are 'significant'
 LARGE_FIRE_THRESHOLD = 100.0  # acres - large fires
 
 # Output paths

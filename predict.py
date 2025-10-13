@@ -54,28 +54,45 @@ def load_historical_grid_density():
 
 
 def get_grid_fire_density(latitude, longitude):
-    # gets historical fire density for a specific location
+    """
+    Gets historical fire density for a specific location
+    
+    FIX #3: Added comprehensive error handling for missing historical data
+    """
+    try:
+        # Create grid cell ID
+        lat_grid = (latitude // GRID_SIZE) * GRID_SIZE
+        lon_grid = (longitude // GRID_SIZE) * GRID_SIZE
+        grid_cell = f"{lat_grid}_{lon_grid}"
 
-    # creating grid cell ID
-    lat_grid = (latitude // GRID_SIZE) * GRID_SIZE
-    lon_grid = (longitude // GRID_SIZE) * GRID_SIZE
-    grid_cell = f"{lat_grid}_{lon_grid}"
+        # Load historical data
+        hist_data = load_historical_grid_density()
 
-    # loading historical data
-    hist_data = load_historical_grid_density()
+        # CHECK 1: Data exists
+        if hist_data is None or len(hist_data) == 0:
+            print(f"Warning: No historical data available. Using default density of 50.")
+            return 50.0
 
-    if len(hist_data) == 0:
-        return 50.0  # falling back to default
-
-    # look up grid cell
-    cell_data = hist_data[hist_data["grid_cell"] == grid_cell]
-
-    if len(cell_data) > 0:
-        return float(cell_data["fire_count"].values[0])
-    else:
-        # grid cell has no historical fires, using median of all cells
-        median_density = hist_data["fire_count"].median()
-        return float(median_density)
+        # CHECK 2: Grid cell exists
+        cell_data = hist_data[hist_data["grid_cell"] == grid_cell]
+        
+        if len(cell_data) > 0:
+            return float(cell_data["fire_count"].values[0])
+        else:
+            # CHECK 3: Use median as fallback
+            if "fire_count" in hist_data.columns and len(hist_data) > 0:
+                median_density = hist_data["fire_count"].median()
+                if pd.isna(median_density):
+                    return 50.0
+                return float(median_density)
+            else:
+                return 50.0
+                
+    except Exception as e:
+        # CATCH-ALL: Any unexpected error
+        print(f"Error getting grid fire density for ({latitude}, {longitude}): {e}")
+        print(f"Falling back to default density of 50.")
+        return 50.0
 
 
 def validate_input(latitude, longitude, year, month):
@@ -296,6 +313,15 @@ def predict_region_grid(lat_min, lat_max, lon_min, lon_max, year, month, state=N
     # validating inputs
     validate_input(lat_min, lon_min, year, month)
     validate_input(lat_max, lon_max, year, month)
+
+    if lat_max <= lat_min:
+        raise ValueError(
+            f"lat_max ({lat_max}) must be greater than lat_min ({lat_min})"
+        )
+    if lon_max <= lon_min:
+        raise ValueError(
+            f"lon_max ({lon_max}) must be greater than lon_min ({lon_min})"
+        )
 
     # create grid
     lats = np.arange(lat_min, lat_max, GRID_SIZE)

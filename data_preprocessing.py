@@ -88,7 +88,7 @@ def create_temporal_features(df):
 
     # Fire season flag (typically may-october in most regions)
     df["is_fire_season"] = (
-        (df["DISCOVERY_DOY"] >= 120) & (df["DISCOVERY_DOY"] <= 300)
+        (df["DISCOVERY_DOY"] >= 121) & (df["DISCOVERY_DOY"] <= 300)
     ).astype(int)
 
     # Historical fires in the same time window
@@ -132,6 +132,10 @@ def aggregate_to_grid_level(df):
                 "grid_fire_density": "first",
                 "min_coast_distance": "first",
                 "is_fire_season": "first",
+                "doy_sin": "mean",
+                "doy_cos": "mean",
+                "season": lambda x: x.mode()[0] if len(x) > 0 else "Unknown",
+                "fires_in_region_recent": "max",
                 "STATE": lambda x: x.mode()[0] if len(x) > 0 else None,
             }
         )
@@ -155,6 +159,10 @@ def aggregate_to_grid_level(df):
             "grid_fire_density_first": "grid_fire_density",
             "min_coast_distance_first": "min_coast_distance",
             "is_fire_season_first": "is_fire_season",
+            "doy_sin_mean": "doy_sin",
+            "doy_cos_mean": "doy_cos",
+            "season_<lambda>": "season",
+            "fires_in_region_recent_max": "fires_in_region_recent",
         },
         inplace=True,
     )
@@ -162,9 +170,18 @@ def aggregate_to_grid_level(df):
     return grid_features
 
 
+def encode_season(df):
+    # encoding seasons as numerical features
+    season_map = {"Winter": 0, "Spring": 1, "Summer": 2, "Fall": 3, "Unknown": -1}
+    df["season_encoded"] = df["season"].map(season_map)
+    return df
+
+
 def prepare_features_and_target(df):
     # Prepare final feature matrix and target
     print("Preparing features and target...")
+
+    df = encode_season(df)
 
     # Select features for modeling
     feature_cols = [
@@ -175,6 +192,10 @@ def prepare_features_and_target(df):
         "grid_fire_density",
         "min_coast_distance",
         "is_fire_season",
+        "doy_sin",
+        "doy_cos",
+        "season_encoded",
+        "fires_in_region_recent",
     ]
 
     # Handling categorical variables
@@ -195,6 +216,7 @@ def prepare_features_and_target(df):
     X = X.fillna(X.mean())
 
     print(f"Feature matrix shape: {X.shape}")
+    print(f"Features used: {feature_cols}")
     print(f"Target distribution:\n{y.value_counts()}")
     print(f"Positive class ratio: {y.mean():.3f}")
 

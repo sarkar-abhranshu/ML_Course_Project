@@ -6,6 +6,13 @@ from config import *
 # Global cache for historical grid density data
 _historical_grid_density = None
 
+RISK_THRESHOLDS = {
+    "Low": 0.2,
+    "Moderate": 0.4,
+    "High": 0.8,
+    "Very High": 0.95,
+}
+
 
 def load_best_model():
     # load best performing model
@@ -71,6 +78,41 @@ def get_grid_fire_density(latitude, longitude):
         return float(median_density)
 
 
+def validate_input(latitude, longitude, year, month):
+    """
+    Validate input parameters for prediction
+
+    Parameters:
+    -----------
+    latitude : float
+        Must be between 24 and 50 (continental US)
+    longitude : float
+        Must be between -125 and -65 (continental US)
+    year : int
+        Year for prediction
+    month : int
+        Month must be between 1 and 12
+
+    Returns:
+    --------
+    bool : True if all inputs are valid
+
+    Raises:
+    -------
+    ValueError : If any input is out of valid range
+    """
+    if not (24 <= latitude <= 50):
+        raise ValueError(f"Latitude {latitude} out of range [24, 50]")
+    if not (-125 <= longitude <= -65):
+        raise ValueError(f"Longitude {longitude} out of range [-125, -65]")
+    if not (1 <= month <= 12):
+        raise ValueError(f"Month {month} out of range [1, 12]")
+    if not isinstance(year, (int, np.integer)) or year < 1900 or year > 2100:
+        raise ValueError(f"Year {year} out of valid range")
+
+    return True
+
+
 def predict_fire_likelihood(latitude, longitude, year, month, state=None):
     """
     Predict wildfire likelihood for specific location and time
@@ -91,7 +133,14 @@ def predict_fire_likelihood(latitude, longitude, year, month, state=None):
     Returns:
     --------
     dict : Prediction results
+
+    Raises:
+    -------
+    ValueError : If inputs are out of valid ranges
     """
+    # validate inputs
+    validate_input(latitude, longitude, year, month)
+
     # load model and preprocessors
     model, scaler, state_encoder, feature_cols = load_best_model()
 
@@ -124,11 +173,55 @@ def predict_fire_likelihood(latitude, longitude, year, month, state=None):
         "is_fire_season": is_fire_season,
     }
 
+    # adding engineered features that match preprocessing
+    if "doy_sin" in feature_cols or "doy_cos" in feature_cols:
+        # approximating day of year based on month
+        approx_doy = month * 30.44 - 15
+        if approx_doy > 365:
+            approx_doy -= 365
+
+        if "doy_sin" in feature_cols:
+            features["doy_sin"] = np.sin(2 * np.pi * approx_doy / 365)
+        if "doy_cos" in feature_cols:
+            features["doy_cos"] = np.cos(2 * np.pi * approx_doy / 365)
+
+        # Add season encoding if present
+        if "season_encoded" in feature_cols:
+            season_map = {
+                1: 0,
+                2: 1,
+                3: 2,
+                4: 2,
+                5: 2,
+                6: 2,
+                7: 2,
+                8: 2,
+                9: 1,
+                10: 1,
+                11: 1,
+                12: 0,
+            }
+            features["season_encoded"] = season_map.get(month, -1)
+
+        # Add fires_in_region_recent if present (default to 0 for single predictions)
+        if "fires_in_region_recent" in feature_cols:
+            features["fires_in_region_recent"] = 0
+
     if state and state_encoder and "state_encoded" in feature_cols:
         try:
             features["state_encoded"] = state_encoder.transform([state])[0]
-        except:
-            features["state_encoded"] = -1  # unknown state
+        except ValueError:
+            print(
+                f"Warning: State '{state}' not found in training data. Using unknown state."
+            )
+            # using the encoded value for "Unknown" if available
+            try:
+                features["state_encoded"] = state_encoder.transform(["Unknown"])[0]
+            except:
+                # using mean of all encoded values
+                features["state_encoded"] = state_encoder.transform(
+                    state_encoder.categories_[0]
+                )[0]
 
     # create dataframe with correct column order
     X = pd.DataFrame([features])[feature_cols]
@@ -155,14 +248,25 @@ def predict_fire_likelihood(latitude, longitude, year, month, state=None):
 
 
 def get_risk_level(probability):
-    # convert probability to risk level
-    if probability < 0.2:
+    """
+    Convert probability to risk level category
+
+    Parameters:
+    -----------
+    probability : float
+        Fire occurrence probability (0-1)
+
+    Returns:
+    --------
+    str : Risk level category
+    """
+    if probability < RISK_THRESHOLDS["Low"]:
         return "Low"
-    elif probability < 0.4:
+    elif probability < RISK_THRESHOLDS["Moderate"]:
         return "Moderate"
-    elif probability < 0.8:
+    elif probability < RISK_THRESHOLDS["High"]:
         return "High"
-    elif probability < 0.8:
+    elif probability < RISK_THRESHOLDS["Very High"]:
         return "Very High"
     else:
         return "Extreme"
@@ -189,6 +293,10 @@ def predict_region_grid(lat_min, lat_max, lon_min, lon_max, year, month, state=N
     --------
     pd.DataFrame : Predictions for all grid cells
     """
+    # validating inputs
+    validate_input(lat_min, lon_min, year, month)
+    validate_input(lat_max, lon_max, year, month)
+
     # create grid
     lats = np.arange(lat_min, lat_max, GRID_SIZE)
     lons = np.arange(lon_min, lon_max, GRID_SIZE)
@@ -199,15 +307,19 @@ def predict_region_grid(lat_min, lat_max, lon_min, lon_max, year, month, state=N
 
     for lat in lats:
         for lon in lons:
-            result = predict_fire_likelihood(lat, lon, year, month, state)
-            results.append(
-                {
-                    "latitude": lat,
-                    "longitude": lon,
-                    "probability": result["prediction"]["probability"],
-                    "risk_level": result["prediction"]["risk_level"],
-                }
-            )
+            try:
+                result = predict_fire_likelihood(lat, lon, year, month, state)
+                results.append(
+                    {
+                        "latitude": lat,
+                        "longitude": lon,
+                        "probability": result["prediction"]["probability"],
+                        "risk_level": result["prediction"]["risk_level"],
+                    }
+                )
+            except Exception as e:
+                print(f"Error predicting for ({lat}, {lon}): {e}")
+                continue
 
     return pd.DataFrame(results)
 
@@ -221,39 +333,54 @@ def main():
     print("\nExample 1: Single Location Prediction")
     print("-" * 50)
 
-    result = predict_fire_likelihood(
-        latitude=40.0, longitude=-120.0, year=2024, month=7, state="CA"
-    )
+    try:
+        result = predict_fire_likelihood(
+            latitude=40.0, longitude=-120.0, year=2024, month=7, state="CA"
+        )
 
-    print(f"Location: {result['location']}")
-    print(f"Time: {result['time']}")
-    print(f"Fire Likely: {result['prediction']['fire_likely']}")
-    print(f"Probability: {result['prediction']['probability']:.2f}%")
-    print(f"Risk Level: {result['prediction']['risk_level']}")
+        print(f"Location: {result['location']}")
+        print(f"Time: {result['time']}")
+        print(f"Fire Likely: {result['prediction']['fire_likely']}")
+        print(f"Probability: {result['prediction']['probability']:.2f}%")
+        print(f"Risk Level: {result['prediction']['risk_level']}")
+    except Exception as e:
+        print(f"Error in single prediction: {e}")
 
     # example 2, region grid prediction
     print("\n\nExample 2: Region Grid Prediction")
     print("-" * 50)
 
-    region_results = predict_region_grid(
-        lat_min=39.0,
-        lat_max=41.0,
-        lon_min=-121.0,
-        lon_max=-119.0,
-        year=2024,
-        month=8,
-        state="CA",
-    )
+    try:
+        region_results = predict_region_grid(
+            lat_min=39.0,
+            lat_max=41.0,
+            lon_min=-121.0,
+            lon_max=-119.0,
+            year=2024,
+            month=8,
+            state="CA",
+        )
 
-    print(region_results.head(10))
-    print(f"\nTotal cells predicted: {len(region_results)}")
-    print(
-        f"High risk cells: {len(region_results[region_results['risk_level'].isin(['High', 'Very High', 'Extreme'])])}"
-    )
+        print(region_results.head(10))
+        print(f"\nTotal cells predicted: {len(region_results)}")
 
-    # saving results
-    region_results.to_csv(f"{RESULTS_DIR}region_predictions.csv", index=False)
-    print(f"\nResults saved to {RESULTS_DIR}region_predictions.csv")
+        # counting cells by risk level
+        risk_counts = region_results["risk_level"].value_counts()
+        print(f"\nRisk level distribution:")
+        print(risk_counts)
+
+        high_risk = len(
+            region_results[
+                region_results["risk_level"].isin(["High", "Very High", "Extreme"])
+            ]
+        )
+        print(f"\nHigh/Very High/Extreme risk cells: {high_risk}")
+
+        # saving results
+        region_results.to_csv(f"{RESULTS_DIR}region_predictions.csv", index=False)
+        print(f"\nResults saved to {RESULTS_DIR}region_predictions.csv")
+    except Exception as e:
+        print(f"Error in region prediction: {e}")
 
 
 if __name__ == "__main__":

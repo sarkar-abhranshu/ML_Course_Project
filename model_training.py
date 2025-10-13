@@ -26,7 +26,20 @@ def load_processed_data():
 
 
 def handle_class_imbalance(X_train, y_train):
-    # handle class imbalance using smote
+    """
+    Handle class imbalance using SMOTE
+
+    Parameters:
+    -----------
+    X_train : array-like
+        Training features
+    y_train : array-like
+        Training labels
+
+    Returns:
+    --------
+    tuple : (X_resampled, y_resampled) - balanced training data
+    """
     print("\nHandling class imbalance using SMOTE...")
     print(f"Original distribution: {np.bincount(y_train)}")
 
@@ -38,7 +51,24 @@ def handle_class_imbalance(X_train, y_train):
 
 
 def train_logistic_regression(X_train, y_train, X_val, y_val):
-    # training logistic regression model
+    """
+    Train logistic regression model
+
+    Parameters:
+    -----------
+    X_train : array-like
+        Training features (should be resampled)
+    y_train : array-like
+        Training labels (should be resampled)
+    X_val : array-like
+        Validation features
+    y_val : array-like
+        Validation labels
+
+    Returns:
+    --------
+    model : Trained LogisticRegression model
+    """
     print("\nTraining Logistic Regression...")
 
     model = LogisticRegression(
@@ -58,7 +88,24 @@ def train_logistic_regression(X_train, y_train, X_val, y_val):
 
 
 def train_random_forest(X_train, y_train, X_val, y_val):
-    # train random forest model
+    """
+    Train random forest model
+
+    Parameters:
+    -----------
+    X_train : array-like
+        Training features (should be resampled)
+    y_train : array-like
+        Training labels (should be resampled)
+    X_val : array-like
+        Validation features
+    y_val : array-like
+        Validation labels
+
+    Returns:
+    --------
+    model : Trained RandomForestClassifier model
+    """
     print("\nTraining Random Forest...")
 
     model = RandomForestClassifier(
@@ -94,11 +141,39 @@ def train_random_forest(X_train, y_train, X_val, y_val):
 
 
 def train_xgboost(X_train, y_train, X_val, y_val):
-    # training xgboost model
+    """
+    Train XGBoost model
+
+    Parameters:
+    -----------
+    X_train : array-like
+        Training features (should be resampled and balanced)
+    y_train : array-like
+        Training labels (should be resampled and balanced)
+    X_val : array-like
+        Validation features
+    y_val : array-like
+        Validation labels
+
+    Returns:
+    --------
+    model : Trained XGBClassifier model
+    """
     print("\nTraining XGBoost...")
 
-    # Calculate scale_pos_weight for imbalanced data
-    scale_pos_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1])
+    # calculating scale_pos_weight from RESAMPLED (balanced) data
+    num_neg = np.sum(y_train == 0)
+    num_pos = np.sum(y_train == 1)
+
+    if num_pos > 0:
+        scale_pos_weight = num_neg / num_pos
+    else:
+        scale_pos_weight = 1.0
+
+    print(f"Class distribution in training data:")
+    print(f"  - Negative samples: {num_neg}")
+    print(f"  - Positive samples: {num_pos}")
+    print(f"  - Class ratio (neg/pos): {scale_pos_weight:.4f}")
 
     model = xgb.XGBClassifier(
         n_estimators=100,
@@ -107,6 +182,7 @@ def train_xgboost(X_train, y_train, X_val, y_val):
         scale_pos_weight=scale_pos_weight,
         random_state=RANDOM_STATE,
         n_jobs=-1,
+        verbosity=0,
     )
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
@@ -127,6 +203,13 @@ def main():
 
     # load data
     X_train, X_val, X_test, y_train, y_val, y_test, feature_cols = load_processed_data()
+
+    print(f"\nDataset Information:")
+    print(f"Features being used: {feature_cols}")
+    print(f"Number of features: {len(feature_cols)}")
+    print(f"Training set size: {X_train.shape[0]}")
+    print(f"Validation set size: {X_val.shape[0]}")
+    print(f"Test set size: {X_test.shape[0]}")
 
     X_train_resampled, y_train_resampled = handle_class_imbalance(X_train, y_train)
 

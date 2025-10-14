@@ -26,9 +26,16 @@ def load_best_model():
     except:
         state_encoder = None
 
+    try:
+        cause_encoder = joblib.load(f"{MODEL_DIR}cause_encoder.pkl")
+        top_causes = joblib.load(f"{MODEL_DIR}top_causes.pkl")
+    except:
+        cause_encoder = None
+        top_causes = None
+
     feature_cols = joblib.load(f"{MODEL_DIR}processed_data.pkl")["feature_cols"]
 
-    return model, scaler, state_encoder, feature_cols
+    return model, scaler, state_encoder, cause_encoder, top_causes, feature_cols
 
 
 def load_historical_grid_density():
@@ -56,8 +63,6 @@ def load_historical_grid_density():
 def get_grid_fire_density(latitude, longitude):
     """
     Gets historical fire density for a specific location
-    
-    FIX #3: Added comprehensive error handling for missing historical data
     """
     try:
         # Create grid cell ID
@@ -70,12 +75,14 @@ def get_grid_fire_density(latitude, longitude):
 
         # CHECK 1: Data exists
         if hist_data is None or len(hist_data) == 0:
-            print(f"Warning: No historical data available. Using default density of 50.")
+            print(
+                f"Warning: No historical data available. Using default density of 50."
+            )
             return 50.0
 
         # CHECK 2: Grid cell exists
         cell_data = hist_data[hist_data["grid_cell"] == grid_cell]
-        
+
         if len(cell_data) > 0:
             return float(cell_data["fire_count"].values[0])
         else:
@@ -87,7 +94,7 @@ def get_grid_fire_density(latitude, longitude):
                 return float(median_density)
             else:
                 return 50.0
-                
+
     except Exception as e:
         # CATCH-ALL: Any unexpected error
         print(f"Error getting grid fire density for ({latitude}, {longitude}): {e}")
@@ -130,7 +137,87 @@ def validate_input(latitude, longitude, year, month):
     return True
 
 
-def predict_fire_likelihood(latitude, longitude, year, month, state=None):
+def create_cause_features_vector(
+    feature_cols, top_causes, cause=None, cause_encoder=None
+):
+    """
+    Create cause feature vector for predictions matching the training features
+
+    Parameters:
+    -----------
+    feature_cols : list
+        List of feature column names from training
+    top_causes : list
+        List of top causes from training
+    cause : str, optional
+        Specific cause, if known
+
+    Returns:
+    --------
+    dict : Dictionary with all cause features
+    """
+    cause_features = {}
+
+    # Find all cause-related features in the training columns
+    cause_feature_cols = [col for col in feature_cols if col.startswith("cause_")]
+
+    # Initialize all cause features to 0
+    for col in cause_feature_cols:
+        cause_features[col] = 0
+
+    # If a specific cause is provided, set its features
+    if cause:
+        # Normalize the cause name to match the feature naming convention
+        normalized_cause = cause.replace(" ", "_").replace("/", "_").lower()
+
+        # Look for matching feature columns
+        found = False
+        for col in cause_feature_cols:
+            if col == "cause_encoded_max":
+                continue
+            if normalized_cause in col:
+                cause_features[col] = 1
+                found = True
+                break
+        if not found:
+            # If cause not found in top causes, set "other" features to 1
+            for col in cause_feature_cols:
+                if "other" in col and col != "cause_encoded_max":
+                    cause_features[col] = 1
+                    break
+
+        # Handle cause_encoded_max if present
+        if "cause_encoded_max" in cause_feature_cols and cause_encoder:
+            try:
+                cause_features["cause_encoded_max"] = cause_encoder.transform([cause])[
+                    0
+                ]
+            except:
+                # If cause not in encoder, try to get the code for "Other" or use 0
+                try:
+                    cause_features["cause_encoded_max"] = cause_encoder.transform(
+                        ["Other"]
+                    )[0]
+                except:
+                    cause_features["cause_encoded_max"] = 0
+    else:
+        # If cause not found in top causes, set "other" features to 1
+        for col in cause_feature_cols:
+            if "other" in col:
+                cause_features[col] = 1
+
+        if "cause_encoded_max" in cause_feature_cols and cause_encoder:
+            try:
+                cause_features["cause_encoded_max"] = cause_encoder.transform(
+                    ["Other"]
+                )[0]
+            except:
+                cause_features["cause_encoded_max"] = 0
+
+    return cause_features
+
+
+def predict_fire_likelihood(latitude, longitude, year, month, state=None, cause=None):
     """
     Predict wildfire likelihood for specific location and time
 
@@ -159,7 +246,9 @@ def predict_fire_likelihood(latitude, longitude, year, month, state=None):
     validate_input(latitude, longitude, year, month)
 
     # load model and preprocessors
-    model, scaler, state_encoder, feature_cols = load_best_model()
+    model, scaler, state_encoder, cause_encoder, top_causes, feature_cols = (
+        load_best_model()
+    )
 
     # create grid cell
     lat_grid = (latitude // GRID_SIZE) * GRID_SIZE
@@ -224,6 +313,12 @@ def predict_fire_likelihood(latitude, longitude, year, month, state=None):
         if "fires_in_region_recent" in feature_cols:
             features["fires_in_region_recent"] = 0
 
+    # Add cause features
+    cause_features_dict = create_cause_features_vector(
+        feature_cols, top_causes, cause, cause_encoder
+    )
+    features.update(cause_features_dict)
+
     if state and state_encoder and "state_encoded" in feature_cols:
         try:
             features["state_encoded"] = state_encoder.transform([state])[0]
@@ -236,12 +331,20 @@ def predict_fire_likelihood(latitude, longitude, year, month, state=None):
                 features["state_encoded"] = state_encoder.transform(["Unknown"])[0]
             except:
                 # using mean of all encoded values
-                features["state_encoded"] = state_encoder.transform(
-                    state_encoder.categories_[0]
-                )[0]
+                features["state_encoded"] = 0
 
     # create dataframe with correct column order
     X = pd.DataFrame([features])[feature_cols]
+
+    # Ensure all required columns are present
+    missing_cols = set(feature_cols) - set(X.columns)
+    if missing_cols:
+        print(f"Warning: Missing columns {missing_cols}. Setting to 0.")
+        for col in missing_cols:
+            X[col] = 0
+
+    # Select only the required columns in the correct order
+    X = X[feature_cols]
 
     # scale features
     X_scaled = scaler.transform(X)
@@ -254,6 +357,7 @@ def predict_fire_likelihood(latitude, longitude, year, month, state=None):
     result = {
         "location": {"latitude": latitude, "longitude": longitude, "state": state},
         "time": {"year": year, "month": month, "is_fire_season": bool(is_fire_season)},
+        "fire_cause": cause if cause else "Other",
         "prediction": {
             "fire_likely": bool(prediction),
             "probability": float(probability),
@@ -289,7 +393,9 @@ def get_risk_level(probability):
         return "Extreme"
 
 
-def predict_region_grid(lat_min, lat_max, lon_min, lon_max, year, month, state=None):
+def predict_region_grid(
+    lat_min, lat_max, lon_min, lon_max, year, month, state=None, cause=None
+):
     """
     Predict wildfire likelihood across a grid of locations
 
@@ -339,6 +445,7 @@ def predict_region_grid(lat_min, lat_max, lon_min, lon_max, year, month, state=N
                     {
                         "latitude": lat,
                         "longitude": lon,
+                        "fire_cause": result["fire_cause"],
                         "probability": result["prediction"]["probability"],
                         "risk_level": result["prediction"]["risk_level"],
                     }
@@ -355,7 +462,7 @@ def main():
     print("Wildfire Prediction System")
     print("=" * 50)
 
-    # example 1, single location prediction
+    # example 1, single location prediction, no cause
     print("\nExample 1: Single Location Prediction")
     print("-" * 50)
 
@@ -366,14 +473,38 @@ def main():
 
         print(f"Location: {result['location']}")
         print(f"Time: {result['time']}")
+        print(f"Fire Cause: {result['fire_cause']}")
         print(f"Fire Likely: {result['prediction']['fire_likely']}")
         print(f"Probability: {result['prediction']['probability']:.2f}%")
         print(f"Risk Level: {result['prediction']['risk_level']}")
     except Exception as e:
         print(f"Error in single prediction: {e}")
 
-    # example 2, region grid prediction
-    print("\n\nExample 2: Region Grid Prediction")
+    # example 2, single location prediction with cause
+    print("\n\nExample 2: Single Location Prediction (Lightning Cause)")
+    print("-" * 50)
+
+    try:
+        result = predict_fire_likelihood(
+            latitude=40.0,
+            longitude=-120.0,
+            year=2024,
+            month=7,
+            state="CA",
+            cause="Lightning",
+        )
+
+        print(f"Location: {result['location']}")
+        print(f"Time: {result['time']}")
+        print(f"Fire Cause: {result['fire_cause']}")
+        print(f"Fire Likely: {result['prediction']['fire_likely']}")
+        print(f"Probability: {result['prediction']['probability']:.4f}")
+        print(f"Risk Level: {result['prediction']['risk_level']}")
+    except Exception as e:
+        print(f"Error in single prediction: {e}")
+
+    # example 3, region grid prediction
+    print("\n\nExample 3: Region Grid Prediction (Campfire Cause)")
     print("-" * 50)
 
     try:
@@ -385,6 +516,7 @@ def main():
             year=2024,
             month=8,
             state="CA",
+            cause="Campfire",
         )
 
         print(region_results.head(10))
@@ -403,8 +535,10 @@ def main():
         print(f"\nHigh/Very High/Extreme risk cells: {high_risk}")
 
         # saving results
-        region_results.to_csv(f"{RESULTS_DIR}region_predictions.csv", index=False)
-        print(f"\nResults saved to {RESULTS_DIR}region_predictions.csv")
+        region_results.to_csv(
+            f"{RESULTS_DIR}region_predictions_campfire.csv", index=False
+        )
+        print(f"\nResults saved to {RESULTS_DIR}region_predictions_campfire.csv")
     except Exception as e:
         print(f"Error in region prediction: {e}")
 

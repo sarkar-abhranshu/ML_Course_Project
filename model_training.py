@@ -5,7 +5,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 import xgboost as xgb
 from imblearn.over_sampling import SMOTE
-from imblearn.under_sampling import RandomUnderSampler
 import joblib
 import os
 from config import *
@@ -50,7 +49,7 @@ def handle_class_imbalance(X_train, y_train):
     return X_resampled, y_resampled
 
 
-def train_logistic_regression(X_train, y_train, X_val, y_val):
+def train_logistic_regression(X_train, y_train, X_val, y_val, feature_cols):
     """
     Train logistic regression model
 
@@ -64,6 +63,8 @@ def train_logistic_regression(X_train, y_train, X_val, y_val):
         Validation features
     y_val : array-like
         Validation labels
+    feature_cols : list
+        List of feature names
 
     Returns:
     --------
@@ -84,10 +85,31 @@ def train_logistic_regression(X_train, y_train, X_val, y_val):
     print(classification_report(y_val, y_val_pred))
     print(f"ROC-AUC: {roc_auc_score(y_val, y_val_proba):.4f}")
 
+    # feature importance (coefficients)
+    print("\nTop 10 Important Features (by absolute coefficient):")
+    feature_importance = pd.DataFrame(
+        {
+            "feature": feature_cols,
+            "coefficient": model.coef_[0],
+        }
+    )
+    feature_importance["abs_coefficient"] = np.abs(feature_importance["coefficient"])
+    feature_importance = feature_importance.sort_values(
+        "abs_coefficient", ascending=False
+    )
+    print(feature_importance.head(10))
+
+    cause_features = feature_importance[
+        feature_importance["feature"].str.startswith("cause_")
+    ]
+    if len(cause_features) > 0:
+        print("\nFire Cause Feature Importance:")
+        print(cause_features)
+
     return model
 
 
-def train_random_forest(X_train, y_train, X_val, y_val):
+def train_random_forest(X_train, y_train, X_val, y_val, feature_cols):
     """
     Train random forest model
 
@@ -131,16 +153,24 @@ def train_random_forest(X_train, y_train, X_val, y_val):
     print("\nTop 10 Important Features:")
     feature_importance = pd.DataFrame(
         {
-            "feature": joblib.load(f"{MODEL_DIR}processed_data.pkl")["feature_cols"],
+            "feature": feature_cols,
             "importance": model.feature_importances_,
         }
     ).sort_values("importance", ascending=False)
     print(feature_importance.head(10))
 
+    # Separate out cause features for analysis
+    cause_features = feature_importance[
+        feature_importance["feature"].str.startswith("cause_")
+    ]
+    if len(cause_features) > 0:
+        print("\nFire Cause Feature Importance:")
+        print(cause_features)
+
     return model
 
 
-def train_xgboost(X_train, y_train, X_val, y_val):
+def train_xgboost(X_train, y_train, X_val, y_val, feature_cols):
     """
     Train XGBoost model
 
@@ -194,6 +224,24 @@ def train_xgboost(X_train, y_train, X_val, y_val):
     print(classification_report(y_val, y_val_pred))
     print(f"ROC-AUC: {roc_auc_score(y_val, y_val_proba):.4f}")
 
+    # feature importance
+    print("\nTop 10 Important Features:")
+    feature_importance = pd.DataFrame(
+        {
+            "feature": feature_cols,
+            "importance": model.feature_importances_,
+        }
+    ).sort_values("importance", ascending=False)
+    print(feature_importance.head(10))
+
+    # Separate out cause features for analysis
+    cause_features = feature_importance[
+        feature_importance["feature"].str.startswith("cause_")
+    ]
+    if len(cause_features) > 0:
+        print("\nFire Cause Feature Importance:")
+        print(cause_features)
+
     return model
 
 
@@ -206,7 +254,17 @@ def main():
 
     print(f"\nDataset Information:")
     print(f"Features being used: {feature_cols}")
-    print(f"Number of features: {len(feature_cols)}")
+
+    # Count cause features
+    cause_features = [f for f in feature_cols if f.startswith("cause_")]
+    print(f"  - Cause features: {len(cause_features)}")
+    print(f"  - Other features: {len(feature_cols) - len(cause_features)}")
+
+    if cause_features:
+        print(f"\nCause features:")
+        for feat in cause_features:
+            print(f"  - {feat}")
+
     print(f"Training set size: {X_train.shape[0]}")
     print(f"Validation set size: {X_val.shape[0]}")
     print(f"Test set size: {X_test.shape[0]}")
@@ -218,17 +276,17 @@ def main():
 
     if "logistic" in MODELS_TO_TRAIN:
         models["logistic"] = train_logistic_regression(
-            X_train_resampled, y_train_resampled, X_val, y_val
+            X_train_resampled, y_train_resampled, X_val, y_val, feature_cols
         )
 
     if "random_forest" in MODELS_TO_TRAIN:
         models["random_forest"] = train_random_forest(
-            X_train_resampled, y_train_resampled, X_val, y_val
+            X_train_resampled, y_train_resampled, X_val, y_val, feature_cols
         )
 
     if "xgboost" in MODELS_TO_TRAIN:
         models["xgboost"] = train_xgboost(
-            X_train_resampled, y_train_resampled, X_val, y_val
+            X_train_resampled, y_train_resampled, X_val, y_val, feature_cols
         )
 
     # save all models

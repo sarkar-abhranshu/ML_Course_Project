@@ -98,6 +98,61 @@ def create_temporal_features(df):
     return df
 
 
+def create_cause_features(df):
+    """
+    Create fire cause features from STAT_CAUSE_DESCR
+
+    Uses one-hot encoding for top causes and encodes remaining causes as "Other"
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataframe with STAT_CAUSE_DESCR column
+
+    Returns:
+    --------
+    df : pd.DataFrame
+        Dataframe with cause features added
+    le : LabelEncoder
+        Fitted label encoder for causes
+    """
+    print("Creating fire cause features...")
+
+    # Fill missing causes
+    df["STAT_CAUSE_DESCR"] = df["STAT_CAUSE_DESCR"].fillna("Unknown")
+
+    # Get top 8 causes by frequency
+    cause_counts = df["STAT_CAUSE_DESCR"].value_counts()
+    print(f"\nFire cause distribution:")
+    print(cause_counts)
+
+    top_causes = cause_counts.head(8).index.tolist()
+    print(f"\nTop 8 causes selected for one-hot encoding:")
+    for i, cause in enumerate(top_causes, 1):
+        print(f"  {i}. {cause}")
+
+    # Create one-hot encoded features for top causes
+    for cause in top_causes:
+        feature_name = f"cause_{cause.replace(' ', '_').replace('/', '_').lower()}"
+        df[feature_name] = (df["STAT_CAUSE_DESCR"] == cause).astype(int)
+
+    # Create "Other" category for remaining causes
+    df["cause_other"] = (~df["STAT_CAUSE_DESCR"].isin(top_causes)).astype(int)
+
+    # Also create ordinal encoding for all causes as backup
+    le = LabelEncoder()
+    df["cause_encoded"] = le.fit_transform(df["STAT_CAUSE_DESCR"])
+
+    # Save encoder and top causes list
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    joblib.dump(le, f"{MODEL_DIR}cause_encoder.pkl")
+    joblib.dump(top_causes, f"{MODEL_DIR}top_causes.pkl")
+
+    print(f"\nCause encoder and top causes list saved to {MODEL_DIR}")
+
+    return df, le, top_causes
+
+
 def create_target_variable(df):
     # Create target variable for prediction
     print("Creating target variable...")
@@ -122,6 +177,12 @@ def aggregate_to_grid_level(df):
     # monthly time bins
     df["month"] = ((df["DISCOVERY_DOY"] - 1) // 30) + 1
 
+    # getting cause feature column
+    cause_cols = [col for col in df.columns if col.startswith("cause_")]
+
+    # aggregating cause features
+    cause_agg = {col: "max" for col in cause_cols}
+
     # Group by grid cell, year and month
     grid_features = (
         df.groupby(["grid_cell", "lat_grid", "lon_grid", "FIRE_YEAR", "month"])
@@ -137,6 +198,7 @@ def aggregate_to_grid_level(df):
                 "season": lambda x: x.mode()[0] if len(x) > 0 else "Unknown",
                 "fires_in_region_recent": "max",
                 "STATE": lambda x: x.mode()[0] if len(x) > 0 else None,
+                **cause_agg,
             }
         )
         .reset_index()
@@ -197,6 +259,10 @@ def prepare_features_and_target(df):
         "season_encoded",
         "fires_in_region_recent",
     ]
+
+    # adding cause features to the list
+    cause_cols = [col for col in df.columns if col.startswith("cause_")]
+    feature_cols.extend(cause_cols)
 
     # Handling categorical variables
     if "state" in df.columns:
@@ -267,6 +333,7 @@ def main():
     # Feature engineering
     df = create_spatial_features(df)
     df = create_temporal_features(df)
+    df, cause_encoder, top_causes = create_cause_features(df)
     df = create_target_variable(df)
 
     # Aggregate to grid level, best for regional prediction
